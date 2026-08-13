@@ -28,6 +28,257 @@
 
 DECLARE_GLOBAL_DATA_PTR;
 
+
+/*
+ * tps6594_wdog_disable - 直接 MMIO 操作 MCU_I2C0，禁用 TPS6594 看门狗。
+ *
+ * 背景：ti-sci power-domain 对 A72 SPL 不开放 dev-id 221（MCU_I2C0），
+ * 导致 DM probe 失败。此处绕过 DM，直接读写控制器寄存器，
+ * 时钟和引脚复用已由 SYSFW/R5 SPL 在移交前配置完毕。
+ *
+ * 硬件：OMAP I2C IP-V2（ti,j721e-i2c），基地址 0x40b00000。
+ * TPS6594 page 4（看门狗），I2C 从地址 0x12，寄存器 WD_THR_CFG = 0x09。
+ * WD_EN = bit[6]；清零即禁用看门狗。
+ */
+
+/* MCU_I2C0 基地址 */
+#define MCU_I2C0_BASE		0x40b00000UL
+
+/* OMAP I2C IP-V2 寄存器偏移 */
+#define MCCI2C_SYSC		0x010
+#define MCCI2C_IRQSTAT_RAW	0x024	/* 含 BB 位，只读 */
+#define MCCI2C_IRQSTAT		0x028	/* 写 1 清零 */
+#define MCCI2C_SYSS		0x090
+#define MCCI2C_CNT		0x098
+#define MCCI2C_DATA		0x09c
+#define MCCI2C_CON		0x0a4
+#define MCCI2C_OA		0x0a8
+#define MCCI2C_SA		0x0ac
+#define MCCI2C_PSC		0x0b0
+#define MCCI2C_SCLL		0x0b4
+#define MCCI2C_SCLH		0x0b8
+
+/* CON 位 */
+#define MCCI2C_CON_EN		BIT(15)
+#define MCCI2C_CON_MST		BIT(10)
+#define MCCI2C_CON_TRX		BIT(9)
+#define MCCI2C_CON_STP		BIT(1)
+#define MCCI2C_CON_STT		BIT(0)
+
+/* 状态位（IRQSTAT_RAW 与 IRQSTAT 位域相同） */
+#define MCCI2C_STAT_BB		BIT(12)
+#define MCCI2C_STAT_XRDY	BIT(4)
+#define MCCI2C_STAT_RRDY	BIT(3)
+#define MCCI2C_STAT_ARDY	BIT(2)
+#define MCCI2C_STAT_NACK	BIT(1)
+#define MCCI2C_STAT_AL		BIT(0)
+
+#define MCCI2C_SYSS_RDONE	BIT(0)
+
+/* MCU_I2C0 功能时钟：96 MHz（J721S2 默认） */
+#define MCCI2C_FCLK_KHZ		96000U
+#define MCCI2C_SPEED_KHZ	400U	/* Fast Mode */
+
+/* TPS6594 page 4（看门狗） */
+#define TPS6594_WDG_ADDR	0x12
+#define TPS6594_WD_THR_CFG	0x09
+#define TPS6594_WD_EN		BIT(6)
+
+static inline u16 mci2c_rd(u32 off)
+{
+	return readw((void __iomem *)(uintptr_t)(MCU_I2C0_BASE + off));
+}
+
+static inline void mci2c_wr(u16 val, u32 off)
+{
+	writew(val, (void __iomem *)(uintptr_t)(MCU_I2C0_BASE + off));
+}
+
+/* 等待总线空闲（BB=0），超时约 100 ms */
+static int mci2c_wait_bb(void)
+{
+	int t = 10000;
+
+	mci2c_wr(0xffff, MCCI2C_IRQSTAT);
+	while ((mci2c_rd(MCCI2C_IRQSTAT_RAW) & MCCI2C_STAT_BB) && --t)
+		udelay(10);
+	mci2c_wr(0xffff, MCCI2C_IRQSTAT);
+	return t ? 0 : -1;
+}
+
+/* 等待事务事件（XRDY/RRDY/ARDY/NACK/AL），超时约 100 ms */
+static u16 mci2c_wait_ev(void)
+{
+	int t = 10000;
+	u16 s;
+
+	do {
+		udelay(10);
+		s = mci2c_rd(MCCI2C_IRQSTAT_RAW);
+	} while (!(s & (MCCI2C_STAT_XRDY | MCCI2C_STAT_RRDY | MCCI2C_STAT_ARDY |
+			MCCI2C_STAT_NACK | MCCI2C_STAT_AL)) && --t);
+
+	if (!t) {
+		mci2c_wr(0xffff, MCCI2C_IRQSTAT);
+		return 0;
+	}
+	return s;
+}
+
+/* 软复位并配置 400 kHz */
+static int mci2c_init(void)
+{
+	u32 scl;
+	int t = 1000;
+
+	if (mci2c_rd(MCCI2C_CON) & MCCI2C_CON_EN) {
+		mci2c_wr(0, MCCI2C_CON);
+		udelay(50000);
+	}
+	mci2c_wr(0x2, MCCI2C_SYSC);	/* SRST */
+	udelay(1000);
+	mci2c_wr(MCCI2C_CON_EN, MCCI2C_CON);
+	while (!(mci2c_rd(MCCI2C_SYSS) & MCCI2C_SYSS_RDONE) && --t)
+		udelay(1000);
+	if (!t)
+		return -1;
+
+	/*
+	 * 400 kHz：内部时钟 = 9.6 MHz，PSC = 9
+	 * scl = 9600/400 = 24；SCLL = 24-8-7 = 9；SCLH = 8-5 = 3
+	 */
+	scl = (MCCI2C_FCLK_KHZ / 10) / MCCI2C_SPEED_KHZ;
+	mci2c_wr(0, MCCI2C_CON);
+	mci2c_wr(MCCI2C_FCLK_KHZ / (MCCI2C_FCLK_KHZ / 10) - 1, MCCI2C_PSC);
+	mci2c_wr(scl - scl / 3 - 7, MCCI2C_SCLL);
+	mci2c_wr(scl / 3 - 5,       MCCI2C_SCLH);
+	mci2c_wr(MCCI2C_CON_EN, MCCI2C_CON);
+	udelay(1000);
+	mci2c_wr(0xffff, MCCI2C_IRQSTAT);
+	mci2c_wr(0, MCCI2C_OA);
+
+	return mci2c_wait_bb();
+}
+
+/* 从从设备 slave 的寄存器 reg 读取 1 字节 */
+static int mci2c_read1(u8 slave, u8 reg, u8 *val)
+{
+	u16 s;
+
+	if (mci2c_wait_bb())
+		return -1;
+
+	/* 地址阶段：写寄存器偏移 */
+	mci2c_wr(1, MCCI2C_CNT);
+	mci2c_wr(slave, MCCI2C_SA);
+	mci2c_wr(MCCI2C_CON_EN | MCCI2C_CON_MST | MCCI2C_CON_STT |
+		 MCCI2C_CON_STP | MCCI2C_CON_TRX, MCCI2C_CON);
+
+	s = mci2c_wait_ev();
+	if (!s || (s & MCCI2C_STAT_NACK))
+		return -1;
+	if (s & MCCI2C_STAT_XRDY) {
+		mci2c_wr(reg, MCCI2C_DATA);
+		mci2c_wr(MCCI2C_STAT_XRDY, MCCI2C_IRQSTAT);
+	}
+	s = mci2c_wait_ev();
+	if (!s || (s & MCCI2C_STAT_NACK)) {
+		mci2c_wr(0xffff, MCCI2C_IRQSTAT);
+		return -1;
+	}
+	if (s & MCCI2C_STAT_ARDY)
+		mci2c_wr(MCCI2C_STAT_ARDY, MCCI2C_IRQSTAT);
+	mci2c_wr(0xffff, MCCI2C_IRQSTAT);
+
+	if (mci2c_wait_bb())
+		return -1;
+
+	/* 数据阶段：读 1 字节 */
+	mci2c_wr(1, MCCI2C_CNT);
+	mci2c_wr(slave, MCCI2C_SA);
+	mci2c_wr(MCCI2C_CON_EN | MCCI2C_CON_MST | MCCI2C_CON_STT |
+		 MCCI2C_CON_STP, MCCI2C_CON);			/* 无 TRX = 读 */
+
+	s = mci2c_wait_ev();
+	if (!s || (s & MCCI2C_STAT_NACK))
+		return -1;
+	if (!(s & MCCI2C_STAT_RRDY)) {
+		mci2c_wr(0xffff, MCCI2C_IRQSTAT);
+		return -1;
+	}
+	*val = mci2c_rd(MCCI2C_DATA) & 0xff;
+	mci2c_wr(MCCI2C_STAT_RRDY, MCCI2C_IRQSTAT);
+
+	s = mci2c_wait_ev();
+	if (s & MCCI2C_STAT_ARDY)
+		mci2c_wr(MCCI2C_STAT_ARDY, MCCI2C_IRQSTAT);
+	mci2c_wr(0xffff, MCCI2C_IRQSTAT);
+	return 0;
+}
+
+/* 向从设备 slave 的寄存器 reg 写入 1 字节 */
+static int mci2c_write1(u8 slave, u8 reg, u8 val)
+{
+	u16 s;
+	int phase = 0;	/* 0 = 发寄存器地址，1 = 发数据 */
+
+	if (mci2c_wait_bb())
+		return -1;
+
+	mci2c_wr(2, MCCI2C_CNT);	/* 寄存器地址 + 数据，共 2 字节 */
+	mci2c_wr(slave, MCCI2C_SA);
+	mci2c_wr(MCCI2C_CON_EN | MCCI2C_CON_MST | MCCI2C_CON_STT |
+		 MCCI2C_CON_STP | MCCI2C_CON_TRX, MCCI2C_CON);
+
+	while (1) {
+		s = mci2c_wait_ev();
+		if (!s || (s & (MCCI2C_STAT_NACK | MCCI2C_STAT_AL))) {
+			mci2c_wr(0xffff, MCCI2C_IRQSTAT);
+			return -1;
+		}
+		if (s & MCCI2C_STAT_XRDY) {
+			mci2c_wr(phase == 0 ? reg : val, MCCI2C_DATA);
+			mci2c_wr(MCCI2C_STAT_XRDY, MCCI2C_IRQSTAT);
+			phase++;
+		}
+		if (s & MCCI2C_STAT_ARDY) {
+			mci2c_wr(MCCI2C_STAT_ARDY, MCCI2C_IRQSTAT);
+			break;
+		}
+	}
+	mci2c_wr(0xffff, MCCI2C_IRQSTAT);
+	return 0;
+}
+
+static int tps6594_wdog_disable(void)
+{
+	u8 val;
+	int ret;
+
+	ret = mci2c_init();
+	if (ret) {
+		pr_err("%s: MCU_I2C0 init failed\n", __func__);
+		return ret;
+	}
+
+	ret = mci2c_read1(TPS6594_WDG_ADDR, TPS6594_WD_THR_CFG, &val);
+	if (ret) {
+		pr_err("%s: read WD_THR_CFG failed\n", __func__);
+		return ret;
+	}
+
+	val &= ~TPS6594_WD_EN;
+
+	ret = mci2c_write1(TPS6594_WDG_ADDR, TPS6594_WD_THR_CFG, val);
+	if (ret) {
+		pr_err("%s: write WD_THR_CFG failed\n", __func__);
+		return ret;
+	}
+
+	printf("TPS6594 watchdog disabled (WD_THR_CFG=0x%02x)\n", val);
+	return 0;
+}
+
 int board_init(void)
 {
 	return 0;
@@ -369,6 +620,14 @@ void spl_board_init(void)
 {
 	struct udevice *dev;
 	int ret;
+
+	/* wucl debug: disable watchdog
+	 * ① 看门狗禁用必须最先执行
+	 *    - 任何时刻都可能超时，越早禁用越安全
+	 *    - ESM 初始化之前完成，避免 ESM 触发时看门狗干扰
+	 */
+	if (tps6594_wdog_disable())
+		printf("WARNING: TPS6594 watchdog disable failed!\n");
 
 	if (IS_ENABLED(CONFIG_ESM_K3)) {
 		const char * const esms[] = {"esm@700000", "esm@40800000", "esm@42080000"};

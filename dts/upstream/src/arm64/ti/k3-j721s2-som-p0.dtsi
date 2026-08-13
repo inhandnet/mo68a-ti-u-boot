@@ -14,9 +14,15 @@
 	memory@80000000 {
 		device_type = "memory";
 		bootph-all;
+#if 0 //wucl debug
 		/* 16 GB RAM */
 		reg = <0x00000000 0x80000000 0x00000000 0x80000000>,
 		      <0x00000008 0x80000000 0x00000003 0x80000000>;
+#else
+		/* 8 GB RAM */
+		reg = <0x00000000 0x80000000 0x00000000 0x80000000>,
+		      <0x00000008 0x80000000 0x00000001 0x80000000>;
+#endif
 	};
 
 	/* Reserving memory regions still pending */
@@ -248,7 +254,7 @@
 };
 
 &wkup_i2c0 {
-	status = "okay";
+	status = "ok";
 	pinctrl-names = "default";
 	pinctrl-0 = <&wkup_i2c0_pins_default>;
 	clock-frequency = <400000>;

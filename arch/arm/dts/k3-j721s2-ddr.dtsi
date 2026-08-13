@@ -2232,6 +2232,7 @@
 			>;
 		};
 
+#if 0 /* wucl: Mo68 SBC uses only DDRSS0 */
 		memorycontroller1: memorycontroller@29b0000 {
 			compatible = "ti,j721s2-ddrss";
 			reg = <0x0 0x029b0000 0x0 0x4000>,
@@ -4440,5 +4441,6 @@
 				DDRSS1_PHY_1422_DATA
 			>;
 		};
+#endif
 	};
 };
