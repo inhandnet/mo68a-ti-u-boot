@@ -21,7 +21,7 @@
 
 &wkup_vtm0 {
 	bootph-pre-ram;
-	vdd-supply-2 = <&bucka1234>;
+	vdd-supply-2 = <&tps62873a>;
 };
 
 &ospi0_nand {
