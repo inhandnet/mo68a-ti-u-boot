@@ -14,6 +14,7 @@
 #include <init.h>
 #include <log.h>
 #include <net.h>
+#include <power/pmic.h>
 #include <asm/arch/hardware.h>
 #include <asm/gpio.h>
 #include <asm/io.h>
@@ -29,6 +30,7 @@
 DECLARE_GLOBAL_DATA_PTR;
 
 
+#if 0 /* wucl debug: 排查 SPL 卡死是否由这段裸 MMIO 引起 */
 /*
  * tps6594_wdog_disable - 直接 MMIO 操作 MCU_I2C0，禁用 TPS6594 看门狗。
  *
@@ -277,6 +279,45 @@ static int tps6594_wdog_disable(void)
 
 	printf("TPS6594 watchdog disabled (WD_THR_CFG=0x%02x)\n", val);
 	return 0;
+}
+#endif
+
+#define TPS6594_RECOV_CNT_REG_1		0x83
+#define TPS6594_RECOV_CNT_REG_2		0x84
+
+/* RECOV_CNT 每次热复位 +1,达到 THR 时 PMIC 进 SAFE RECOVERY 下电,重新上电
+ * 才能恢复。写 THR=0 使其只累加不触发,喂狗失败降级为无限重启。
+ */
+static void tps6594_recov_cnt_thr_clear(void)
+{
+	struct udevice *dev;
+	int cnt, before, after, ret;
+
+	if (!CONFIG_IS_ENABLED(DM_PMIC))
+		return;
+
+	ret = uclass_get_device_by_name(UCLASS_PMIC, "pmic@48", &dev);
+	if (ret) {
+		printf("PMIC: get failed: %d, RECOV_CNT_THR unchanged\n", ret);
+		return;
+	}
+
+	before = pmic_reg_read(dev, TPS6594_RECOV_CNT_REG_2);
+	ret = pmic_reg_write(dev, TPS6594_RECOV_CNT_REG_2, 0x00);
+	if (ret) {
+		printf("PMIC: RECOV_CNT_THR write failed: %d\n", ret);
+		return;
+	}
+
+	cnt = pmic_reg_read(dev, TPS6594_RECOV_CNT_REG_1);
+	after = pmic_reg_read(dev, TPS6594_RECOV_CNT_REG_2);
+	if (cnt < 0 || before < 0 || after < 0) {
+		printf("PMIC: RECOV_CNT readback failed\n");
+		return;
+	}
+
+	printf("PMIC: RECOV_CNT %d, THR %d -> %d\n",
+	       cnt & 0xf, before & 0xf, after & 0xf);
 }
 
 int board_init(void)
@@ -650,13 +691,12 @@ void spl_board_init(void)
 	struct udevice *dev;
 	int ret;
 
-	/* wucl debug: disable watchdog
-	 * ① 看门狗禁用必须最先执行
-	 *    - 任何时刻都可能超时，越早禁用越安全
-	 *    - ESM 初始化之前完成，避免 ESM 触发时看门狗干扰
-	 */
+#if 0 /* wucl debug: disable watchdog */
 	if (tps6594_wdog_disable())
 		printf("WARNING: TPS6594 watchdog disable failed!\n");
+#endif
+
+	tps6594_recov_cnt_thr_clear();
 
 	if (IS_ENABLED(CONFIG_ESM_K3)) {
 		const char * const esms[] = {"esm@700000", "esm@40800000", "esm@42080000"};
