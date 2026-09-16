@@ -508,7 +508,15 @@ static int regulator_post_probe(struct udevice *dev)
 	int ret;
 
 	ret = regulator_autoset(dev);
-	if (ret && ret != -EMEDIUMTYPE && ret != -EALREADY && ret != ENOSYS)
+	/*
+	 * regulator_autoset() reports a missing .set_enable/.set_value op as
+	 * -ENOSYS. Comparing against the positive ENOSYS never matches, so a
+	 * regulator whose driver only implements get/set_value (e.g. tps6287x)
+	 * fails to probe as soon as it carries regulator-boot-on. Fixes commit
+	 * 332e0a014891 ("power: regulator: Convert regulators_enable_boot_on/
+	 * off() to regulator_post_probe").
+	 */
+	if (ret && ret != -EMEDIUMTYPE && ret != -EALREADY && ret != -ENOSYS)
 		return ret;
 
 	if (_DEBUG)
