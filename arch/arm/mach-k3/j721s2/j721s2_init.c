@@ -324,12 +324,56 @@ void do_dt_magic(void)
 #endif
 
 #ifdef CONFIG_XPL_BUILD
+static const struct {
+	u32 mask;
+	const char *name;
+} reset_src_bits[] = {
+	{ RESET_SRC_STAT_THERMAL_RST,		"THERMAL_RST" },
+	{ RESET_SRC_STAT_DBUGSS_RST,		"DBUGSS_RST" },
+	{ RESET_SRC_STAT_COLD_OUT_RST,		"COLD_OUT_RST" },
+	{ RESET_SRC_STAT_WARM_OUT_RST,		"WARM_OUT_RST" },
+	{ RESET_SRC_STAT_PORZ_PIN,		"PORZ_PIN" },
+	{ RESET_SRC_STAT_RESET_REQZ_PIN,	"RESET_REQZ_PIN" },
+	{ RESET_SRC_STAT_MCU_RSTZ_PIN,		"MCU_RSTZ_PIN" },
+	{ RESET_SRC_STAT_SW_MAIN_POR,		"SW_MAIN_POR" },
+	{ RESET_SRC_STAT_SW_MAIN_WARMRST,	"SW_MAIN_WARMRST" },
+	{ RESET_SRC_STAT_SW_MCU_WARMRST,	"SW_MCU_WARMRST" },
+};
+
+/*
+ * The reset source latch lives in WKUP_CTRL_MMR0, which MCU_PORz resets along
+ * with the rest of the MCU domain, so R5 SPL is the earliest and only place
+ * that still sees it. Report it, then write the bits back to clear the latch
+ * so the next boot starts from a known-zero state.
+ */
+static void report_reset_source(void)
+{
+	u32 stat = readl(CTRLMMR_WKUP_RESET_SRC_STAT);
+	int i;
+
+	printf("Reset source: 0x%08x", stat);
+	for (i = 0; i < ARRAY_SIZE(reset_src_bits); i++)
+		if (stat & reset_src_bits[i].mask)
+			printf(" %s", reset_src_bits[i].name);
+	printf("%s\n", stat ? "" : " (no bits set)");
+
+	writel(stat, TI_SRAM_SCRATCH_RESET_SRC_STAT);
+	writel(TI_SRAM_SCRATCH_RESET_SRC_MAGIC_VAL, TI_SRAM_SCRATCH_RESET_SRC_MAGIC);
+
+	if (stat)
+		writel(stat, CTRLMMR_WKUP_RESET_SRC_STAT);
+}
+
 void board_init_f(ulong dummy)
 {
 	struct udevice *dev;
 	int ret;
 
 	k3_spl_init();
+
+	if (IS_ENABLED(CONFIG_CPU_V7R))
+		report_reset_source();
+
 #if defined(CONFIG_SPL_OF_LIST) && defined(CONFIG_TI_I2C_BOARD_DETECT)
 	do_dt_magic();
 #endif

@@ -343,10 +343,39 @@ void spl_perform_fixups(struct spl_image_info *spl_image)
 #endif
 
 #if defined(CONFIG_OF_LIBFDT) && defined(CONFIG_OF_BOARD_SETUP)
+/*
+ * Publish the reset source that R5 SPL latched for us. The register itself is
+ * gone by now (SPL has to clear the latch), so the value comes from the MCU
+ * scratchpad relay. Local extension, hence the vendor prefix: userspace reads
+ * it back as /proc/device-tree/chosen/inhand,reset-source.
+ */
+static void fixup_reset_source(void *blob)
+{
+	u32 stat;
+	int chosen;
+
+	if (readl(TI_SRAM_SCRATCH_RESET_SRC_MAGIC) !=
+	    TI_SRAM_SCRATCH_RESET_SRC_MAGIC_VAL)
+		return;
+
+	stat = readl(TI_SRAM_SCRATCH_RESET_SRC_STAT);
+
+	chosen = fdt_find_or_add_subnode(blob, 0, "chosen");
+	if (chosen < 0) {
+		printf("reset-source: no /chosen node: %s\n",
+		       fdt_strerror(chosen));
+		return;
+	}
+	fdt_setprop_u32(blob, chosen, "inhand,reset-source", stat);
+
+	env_set_hex("reset_source", stat);
+}
+
 int ft_board_setup(void *blob, struct bd_info *bd)
 {
 
 	detect_enable_spinand(blob);
+	fixup_reset_source(blob);
 
 	return 0;
 }

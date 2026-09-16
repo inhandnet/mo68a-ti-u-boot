@@ -31,11 +31,37 @@
 #define WKUP_DEVSTAT_MCU_OMLY_MASK			BIT(6)
 #define WKUP_DEVSTAT_MCU_ONLY_SHIFT			6
 
+/* Cause of the last reset. All defined bits are write-1-to-clear. */
+#define CTRLMMR_WKUP_RESET_SRC_STAT			(WKUP_CTRL_MMR0_BASE + 0x50)
+#define RESET_SRC_STAT_THERMAL_RST			BIT(24)
+#define RESET_SRC_STAT_DBUGSS_RST			BIT(20)
+#define RESET_SRC_STAT_COLD_OUT_RST			BIT(19)
+#define RESET_SRC_STAT_WARM_OUT_RST			BIT(16)
+#define RESET_SRC_STAT_PORZ_PIN				BIT(11)
+#define RESET_SRC_STAT_RESET_REQZ_PIN			BIT(9)
+#define RESET_SRC_STAT_MCU_RSTZ_PIN			BIT(8)
+#define RESET_SRC_STAT_SW_MAIN_POR			BIT(3)
+#define RESET_SRC_STAT_SW_MAIN_WARMRST			BIT(1)
+#define RESET_SRC_STAT_SW_MCU_WARMRST			BIT(0)
+
 /* ROM HANDOFF Structure location */
 #define ROM_EXTENDED_BOOT_DATA_INFO			0x41cfdb00
 
 /* MCU SCRATCHPAD usage */
 #define TI_SRAM_SCRATCH_BOARD_EEPROM_START	CONFIG_SYS_K3_MCU_SCRATCHPAD_BASE
+
+/*
+ * R5 SPL is the only stage that still sees CTRLMMR_WKUP_RESET_SRC_STAT, and it
+ * has to clear the latch, so it relays the value through the top of the MCU
+ * scratchpad for the later stages. The board EEPROM record sits at the base of
+ * the same window. MCU MSRAM is indeterminate after a cold power-on, hence the
+ * magic word.
+ */
+#define TI_SRAM_SCRATCH_RESET_SRC_MAGIC		(CONFIG_SYS_K3_MCU_SCRATCHPAD_BASE + \
+						 CONFIG_SYS_K3_MCU_SCRATCHPAD_SIZE - 8)
+#define TI_SRAM_SCRATCH_RESET_SRC_STAT		(CONFIG_SYS_K3_MCU_SCRATCHPAD_BASE + \
+						 CONFIG_SYS_K3_MCU_SCRATCHPAD_SIZE - 4)
+#define TI_SRAM_SCRATCH_RESET_SRC_MAGIC_VAL	0x52535453	/* "RSTS" */
 
 #if defined(CONFIG_SYS_K3_SPL_ATF) && !defined(__ASSEMBLY__)
 
